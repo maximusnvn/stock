@@ -3,7 +3,20 @@
 'use strict';
 // ================= DỮ LIỆU & TIỆN ÍCH =================
 let SUM = window.SUMMARY;
-try { const ls = localStorage.getItem('summary_v1'); if (ls) { const p = JSON.parse(ls); if (p && p.rows && p.rows.length > 500) { if (!p.tpn && window.SUMMARY.tpn) p.tpn = window.SUMMARY.tpn; if (!p.rows.some(r=>r.watch) && window.SUMMARY.rows.some(r=>r.watch)) { const wm={}; window.SUMMARY.rows.forEach(r=>{ if(r.watch) wm[r.t]=r; }); p.rows.forEach(r=>{ const w=wm[r.t]; if(w){ r.watch=1; r.wrng=w.wrng; r.wdb=w.wdb; r.wgrade=w.wgrade; } }); } SUM = p; } } } catch(e){}
+try { const ls = localStorage.getItem('summary_v1'); if (ls) { const p = JSON.parse(ls); if (p && p.rows && p.rows.length > 500 && (p.updated||'') > ((window.SUMMARY&&window.SUMMARY.updated)||'')) { if (!p.tpn && window.SUMMARY.tpn) p.tpn = window.SUMMARY.tpn; if (!p.rows.some(r=>r.watch) && window.SUMMARY.rows.some(r=>r.watch)) { const wm={}; window.SUMMARY.rows.forEach(r=>{ if(r.watch) wm[r.t]=r; }); p.rows.forEach(r=>{ const w=wm[r.t]; if(w){ r.watch=1; r.wrng=w.wrng; r.wdb=w.wdb; r.wgrade=w.wgrade; } }); } SUM = p; } } } catch(e){}
+// Luoi an toan: dam bao luon co du 12 truong co ban tu window.SUMMARY neu cache localStorage cu bi thieu
+try {
+  if (window.SUMMARY && window.SUMMARY.rows) {
+    const sMap = {};
+    window.SUMMARY.rows.forEach(r => { if (r && r.t) sMap[r.t] = r; });
+    const TR = ['pe','pb','cap','dy','roe','roa','gm','dte','revYoY','npatYoY','cagr3','q'];
+    SUM.rows.forEach(r => {
+      const src = sMap[r.t];
+      if (!src) return;
+      TR.forEach(k => { if (r[k] == null && src[k] != null) r[k] = src[k]; });
+    });
+  }
+} catch(e){}
 const BO_CUNG = new Set(['DCL','VC3','SSB','KHG','VPI']);
 SUM.rows.forEach(r=>{ if(BO_CUNG.has(r.t)) r.watch=0; });
 if(SUM.tpn&&SUM.tpn.recent) SUM.tpn.recent=SUM.tpn.recent.filter(x=>!BO_CUNG.has(x.t));
@@ -46,12 +59,176 @@ function __fRN(){ return window.__FIN_BANK ? 'TOI' : 'Doanh thu'; }
 function __fRS(){ return window.__FIN_BANK ? 'TOI' : 'DT'; }
 function __fTxtB(x){ return window.__FIN_BANK ? String(x).replace(/Doanh thu/g,'TOI').replace(/doanh thu/g,'TOI') : x; }
 
-async function jget(u){ const r = await fetch(u); if(!r.ok) throw new Error(r.status); return r.json(); }
+async function jget(u){
+  const r = await fetch(u, /iq\.vietcap\.com\.vn/.test(u) ? { referrerPolicy: 'no-referrer' } : undefined);
+  if(!r.ok) throw new Error(r.status); return r.json();
+}
+
+const KN_FF = 'https://api-finfo.vndirect.com.vn/v4/';
+let knVcHong = false; try { knVcHong = sessionStorage.getItem('kn_vc_hong') === '1'; } catch(e){}
+function knVcDanhDau(){ knVcHong = true; try { sessionStorage.setItem('kn_vc_hong', '1'); } catch(e){} }
+function knFfSo(v){ const n = +v; return isFinite(n) ? n : null; }
+function knFfQuyDaXong(n){
+  const out = []; const now = new Date();
+  let y = now.getFullYear(), q = Math.ceil((now.getMonth()+1)/3) - 1;
+  if (q < 1) { q = 4; y--; }
+  for (let i = 0; i < n; i++) {
+    const m = q*3; const d = new Date(Date.UTC(y, m, 0));
+    out.push({ y, q, d: d.toISOString().slice(0,10) });
+    q--; if (q < 1) { q = 4; y--; }
+  }
+  return out;
+}
+async function knFfQuy(t){
+  try {
+    const u = KN_FF + 'financial_statements?q=code:' + t + '~reportType:QUARTER~itemCode:21001,421701,23000,23003,23001,14100&sort=fiscalDate:desc&size=150';
+    const r = await jget(u);
+    const byQ = {};
+    (r.data || []).forEach(x => {
+      const d = String(x.fiscalDate || '').slice(0,10); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return;
+      const y = +d.slice(0,4), q = Math.ceil(+d.slice(5,7)/3), k = y + 'Q' + q;
+      const o = byQ[k] || (byQ[k] = { yearReport: y, lengthReport: q, publicDate: null, _np2: null });
+      const ic = Math.round(+x.itemCode), v = knFfSo(x.numericValue);
+      if (ic === 21001) { if (v != null && v !== 0) o.isa3 = v; }
+      else if (ic === 421701) o.isb38 = v;
+      else if (ic === 23000) o.isa22 = v;
+      else if (ic === 23003) o._np2 = v;
+      else if (ic === 23001) o._eps = v;
+      else if (ic === 14100) o._eq = v;
+      const cd = String(x.createdDate || '').slice(0,10);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(cd) && (!o.publicDate || cd < o.publicDate)) o.publicDate = cd;
+    });
+    const qs = Object.values(byQ).map(o => {
+      if (o.isa22 == null && o._np2 != null) o.isa22 = o._np2;
+      if (!o.publicDate) { const e = new Date(Date.UTC(o.yearReport, o.lengthReport*3, 0)); e.setUTCDate(e.getUTCDate() + 30); o.publicDate = e.toISOString().slice(0,10); }
+      return o;
+    }).filter(o => o.isa22 != null || o.isa3 != null || o.isb38 != null);
+    qs.sort((a,b) => a.yearReport - b.yearReport || a.lengthReport - b.lengthReport);
+    return qs;
+  } catch(e) { return []; }
+}
+async function knFfChiSo(t){
+  try {
+    const MA = 'PRICE_TO_EARNINGS,PRICE_TO_BOOK,MARKETCAP,ROAE_TR_AVG4Q';
+    const quy = knFfQuyDaXong(17);
+    const ngay = [];
+    quy.forEach(x => { for (let k = 0; k < 4; k++) { const d = new Date(x.d + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - k); ngay.push(d.toISOString().slice(0,10)); } });
+    const [ls, moi] = await Promise.all([
+      jget(KN_FF + 'ratios?q=code:' + t + '~ratioCode:' + MA + '~reportDate:' + ngay.join(',') + '&size=400').catch(() => ({})),
+      jget(KN_FF + 'ratios/latest?order=reportDate&filter=ratioCode:' + MA + '&where=code:' + t + '&size=20').catch(() => ({}))
+    ]);
+    const byQ = {};
+    (ls.data || []).forEach(x => {
+      const d = String(x.reportDate || '').slice(0,10); const v = knFfSo(x.value); if (v == null) return;
+      const qq = quy.find(z => d <= z.d && d >= z.d.slice(0,8) + '01' && +d.slice(5,7) === +z.d.slice(5,7)); if (!qq) return;
+      const k = qq.y + 'Q' + qq.q; const o = byQ[k] || (byQ[k] = { yearReport: qq.y, quarter: qq.q, _d: {} });
+      const c = x.ratioCode; if (o._d[c] && o._d[c] > d) return; o._d[c] = d;
+      if (c === 'PRICE_TO_EARNINGS') o.pe = v; else if (c === 'PRICE_TO_BOOK') o.pb = v; else if (c === 'MARKETCAP') o.marketCap = v; else if (c === 'ROAE_TR_AVG4Q') o.roe = v;
+    });
+    const rts = Object.values(byQ).sort((a,b) => a.yearReport - b.yearReport || a.quarter - b.quarter);
+    const now = {}; (moi.data || []).forEach(x => { const v = knFfSo(x.value); if (v == null) return;
+      if (x.ratioCode === 'PRICE_TO_EARNINGS') now.pe = v; else if (x.ratioCode === 'PRICE_TO_BOOK') now.pb = v;
+      else if (x.ratioCode === 'MARKETCAP') now.marketCap = v; else if (x.ratioCode === 'ROAE_TR_AVG4Q') now.roe = v; });
+    if (now.pe != null || now.pb != null || now.marketCap != null) {
+      const d = new Date(); rts.push(Object.assign({ yearReport: d.getFullYear(), quarter: Math.ceil((d.getMonth()+1)/3), _av: Math.floor(Date.now()/1000) }, now));
+      try { const r = byT[t]; if (r) { if (r.pe == null && now.pe != null) r.pe = +now.pe.toFixed(2); if (r.pb == null && now.pb != null) r.pb = +now.pb.toFixed(2);
+        if (r.roe == null && now.roe != null) r.roe = +(now.roe*100).toFixed(1); if (r.cap == null && now.marketCap != null) r.cap = Math.round(now.marketCap/1e9); } } catch(e){}
+    }
+    return rts;
+  } catch(e) { return []; }
+}
+
 const api = {
   ohlc: async (sym, days) => { const to = NOW()+86400; return jget(`https://dchart-api.vndirect.com.vn/dchart/history?symbol=${sym}&resolution=D&from=${to-86400*days}&to=${to}`); },
-  kqkd: async t => (await jget(`https://iq.vietcap.com.vn/api/iq-insight-service/v1/company/${t}/financial-statement?section=INCOME_STATEMENT`))?.data?.quarters || [],
-  ratios: async t => ((await jget(`https://iq.vietcap.com.vn/api/iq-insight-service/v1/company/${t}/statistics-financial`))?.data||[]).filter(x=>x.ratioType==='RATIO_TTM'&&x.quarter>=1&&x.quarter<=4)
+  kqkd: async t => {
+    if (!knVcHong) {
+      try {
+        const q = (await jget(`https://iq.vietcap.com.vn/api/iq-insight-service/v1/company/${t}/financial-statement?section=INCOME_STATEMENT`))?.data?.quarters || [];
+        if (q.length) return q;
+      } catch(e){}
+      knVcDanhDau();
+    }
+    return knFfQuy(t);
+  },
+  ratios: async t => {
+    if (!knVcHong) {
+      try {
+        const r = ((await jget(`https://iq.vietcap.com.vn/api/iq-insight-service/v1/company/${t}/statistics-financial`))?.data||[]).filter(x=>x.ratioType==='RATIO_TTM'&&x.quarter>=1&&x.quarter<=4);
+        if (r.length) return r;
+      } catch(e){}
+      knVcDanhDau();
+    }
+    return knFfChiSo(t);
+  }
 };
+
+async function knBoSungLo(codes){
+  const w = codes.join(',');
+  const MA_TL = 'PRICE_TO_EARNINGS,PRICE_TO_BOOK,MARKETCAP,DIVIDEND_YIELD,ROAE_TR_AVG4Q,ROAA_TR_AVG4Q,GROSS_MARGIN_TR,DEBT_TO_EQUITY_AQ,NET_SALES_QR_GRYOY,NET_PROFIT_QR_GRYOY';
+  const lam = (v, d) => { if (v == null) return null; var m = Math.pow(10, d); return Math.round(v * m) / m; };
+  const kq = await Promise.all([
+    jget(KN_FF + 'ratios/latest?order=reportDate&filter=ratioCode:' + MA_TL + '&where=code:' + w + '&size=' + (codes.length*12)).catch(() => ({})),
+    jget(KN_FF + 'financial_statements?q=code:' + w + '~reportType:QUARTER~itemCode:21001,421701,23000~fiscalDate:gte:' + knFfQuyDaXong(17)[16].d + '&sort=fiscalDate&size=' + (codes.length*3*18)).catch(() => ({}))
+  ]);
+  const tl = kq[0], bc = kq[1], out = {};
+  (tl.data || []).forEach(function(x){
+    const v = knFfSo(x.value); if (v == null || !x.code) return; const o = out[x.code] || (out[x.code] = {});
+    switch (x.ratioCode) {
+      case 'PRICE_TO_EARNINGS': o.pe = lam(v, 2); break;      case 'PRICE_TO_BOOK': o.pb = lam(v, 2); break;
+      case 'MARKETCAP': o.cap = Math.round(v/1e9); break;     case 'DIVIDEND_YIELD': o.dy = lam(v*100, 1); break;
+      case 'ROAE_TR_AVG4Q': o.roe = lam(v*100, 1); break;     case 'ROAA_TR_AVG4Q': o.roa = lam(v*100, 1); break;
+      case 'GROSS_MARGIN_TR': o.gm = lam(v*100, 1); break;    case 'DEBT_TO_EQUITY_AQ': o.dte = lam(v, 2); break;
+      case 'NET_SALES_QR_GRYOY': o.revYoY = lam(v*100, 1); break; case 'NET_PROFIT_QR_GRYOY': o.npatYoY = lam(v*100, 1); break;
+    }
+  });
+  const quy = {};
+  (bc.data || []).forEach(function(x){
+    const d = String(x.fiscalDate || '').slice(0,10); if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || !x.code) return;
+    const y = +d.slice(0,4), q = Math.ceil(+d.slice(5,7)/3), k = y*4 + q, ic = Math.round(+x.itemCode), v = knFfSo(x.numericValue);
+    const m = quy[x.code] || (quy[x.code] = {}); const o = m[k] || (m[k] = { y: y, q: q, rev: 0, np: null });
+    if (ic === 21001 || ic === 421701) { if (v) o.rev = v; } else if (ic === 23000) o.np = v;
+  });
+  Object.keys(quy).forEach(function(c){
+    const o = out[c] || (out[c] = {});
+    const ds = Object.keys(quy[c]).map(Number).sort(function(a,b){ return a-b; }).map(function(k){ return quy[c][k]; }).filter(function(z){ return z.np != null; });
+    if (ds.length) o.q = ds.slice(-9).map(function(z){ return [z.y, z.q, z.rev, z.np]; });
+    if (ds.length >= 16) { const n = ds.length; let ttm = 0, ttm3 = 0;
+      for (let i = 0; i < 4; i++) { ttm += ds[n-1-i].np; ttm3 += ds[n-13-i].np; }
+      if (ttm > 0 && ttm3 > 0) o.cagr3 = lam((Math.pow(ttm/ttm3, 1/3) - 1)*100, 1); }
+  });
+  return out;
+}
+
+// Tu dong bo sung co ban neu con ma thieu trong bo nho
+(function(){
+  const TRUONG = ['pe','pb','cap','dy','roe','roa','gm','dte','revYoY','npatYoY','cagr3','q'];
+  const thieu = r => !!(r && r.t && (r.pe == null || !r.q || !r.q.length));
+  async function tuBoSung(){
+    try {
+      const can = ROWS().filter(thieu);
+      if (!can.length) return;
+      const codes = can.map(r => r.t);
+      const LO = 35;
+      let coSua = false;
+      for (let i = 0; i < codes.length; i += LO) {
+        const batch = codes.slice(i, i + LO);
+        const res = await knBoSungLo(batch);
+        can.slice(i, i + LO).forEach(r => {
+          const o = res[r.t];
+          if (!o) return;
+          TRUONG.forEach(k => { if (r[k] == null && o[k] != null) { r[k] = o[k]; coSua = true; } });
+          if (r._eps == null && r.pe && r.p) r._eps = r.p / r.pe;
+          if (r._bv == null && r.pb && r.p) r._bv = r.p / r.pb;
+          if (r._sh == null && r.cap && r.p) r._sh = r.cap / r.p;
+        });
+        if (coSua && typeof renderSc === 'function' && document.getElementById('view-screener') && document.getElementById('view-screener').style.display !== 'none') {
+          renderSc();
+        }
+      }
+    } catch(e){}
+  }
+  setTimeout(tuBoSung, 1500);
+})();
 
 const ga = (n,p) => { try { window.gtag && gtag('event', n, p||{}); } catch(e){} };
 const _ntf = {};
@@ -161,11 +338,13 @@ try{ROWS().forEach(function(r){if(!r.watch)return;const s=document.getElementByI
   f.dataset.branded = '1';
   f.innerHTML =
     '<div style="font-style:normal;font-weight:700;font-size:13.5px;color:var(--text)">'
-    + '<span class="nbName">Nguyễn Ngọc Anh Khoa</span>'
-    + '<span class="nbSep" style="color:var(--border);font-weight:400;margin:0 8px">|</span>'
+    + 'Nguyễn Ngọc Anh Khoa'
+    + '<span style="color:var(--border);font-weight:400;margin:0 8px">|</span>'
     + '<a href="tel:0339136452" style="color:var(--green-dark);text-decoration:none">0339 136 452</a>'
-    + '<span class="nbSep" style="color:var(--border);font-weight:400;margin:0 8px">|</span>'
-    + '<span class="nbTitle">Giám đốc Tư vấn Đầu tư — Chứng khoán KAFI</span>'
+    + '<span style="color:var(--border);font-weight:400;margin:0 8px">|</span>'
+    + 'Giám đốc Tư vấn Đầu tư — Chứng khoán KAFI'
+    + '<span style="color:var(--border);font-weight:400;margin:0 8px">|</span>'
+    + '<a href="https://khoanguyeninvest.vn" style="color:var(--green-dark);text-decoration:none">khoanguyeninvest.vn</a>'
     + '</div>'
     + '<div id="footDisc" style="margin-top:7px;font-size:11px;font-style:italic">Số liệu hiệu suất từ mô phỏng lịch sử (backtest) đã gồm phí giao dịch; kết quả quá khứ không đảm bảo tương lai — thông tin chỉ mang tính tham khảo, không phải khuyến nghị đầu tư.</div>';
 })();
@@ -465,7 +644,7 @@ function ensureFreshBanner(){
     b.id = 'staleBtn'; b.className = 'btn';
     b.style.cssText = 'margin-left:10px;padding:4px 12px;font-size:12px;background:#fdecec;border:1px solid #f0a8ab;color:#c0353a;font-weight:700;border-radius:8px;cursor:pointer';
     b.textContent = 'Dữ liệu cơ bản đã cũ ' + Math.floor(age) + ' ngày — bấm cập nhật (~2 phút)';
-    b.onclick = () => { b.remove(); location.reload(); };
+    b.onclick = () => { b.remove(); document.getElementById('btnRefresh').click(); };
     meta.parentNode.appendChild(b);
   } catch(e){}
 }
@@ -491,21 +670,52 @@ function ensureNotifBanner(){
   };
   meta.parentNode.appendChild(b);
 }
-async function verifySignalAt(t, ds){ return null; }
+async function verifySignalAt(t, ds){
+  try {
+    const bts = Math.floor(new Date(ds+'T00:00:00Z').getTime()/1000);
+    const r = await jget(`https://dchart-api.vndirect.com.vn/dchart/history?symbol=${t}&resolution=D&from=${bts-120*86400}&to=${bts+43200}`);
+    const c = r.c, v = r.v, tt = r.t; if (!c || c.length < 35) return null;
+    const i = c.length-1;
+    if (Math.abs(tt[i]-bts) > 86400) return null;
+    const thr = (byT[t] && byT[t].b === 'HN') ? 8.8 : 6.3;
+    const chg = (c[i]/c[i-1]-1)*100; if (chg < thr) return null;
+    let hi=-1e9, lo=1e9, hc=false, sv=0, svv=0;
+    for (let k=i-30; k<i; k++){ if(c[k]>hi)hi=c[k]; if(c[k]<lo)lo=c[k]; if((c[k]/c[k-1]-1)*100>=thr)hc=true; }
+    for (let k=i-20; k<i; k++){ sv+=v[k]; svv+=c[k]*v[k]; }
+    const v20=sv/20, gt=svv/20/1e6;
+    if (hc || (hi-lo)/lo*100 > 12 || v[i] < 2*v20 || gt < 15) return null;
+    return {bp: +c[i].toFixed(2)};
+  } catch(e){ return null; }
+}
 async function retroScanSignals(){
   try {
-    const R = (window.SIGS && window.SIGS.recent10) || []; if (!R.length) return;
+    const KEY='kafi_retro_ts';
+    if (Date.now() - (+localStorage.getItem(KEY)||0) < 6*3600*1000) return;
     const tpn = SUM.tpn; if (!tpn || !tpn.recent) return;
     let store = loadLiveDeals(); let changed = false;
-    for (const sg of R) {
-      if (BO_CUNG.has(sg.t)) continue;
-      if (store.some(x => x.t === sg.t && x.bdate === sg.bdate)) continue;
-      if (tpn.recent.some(x => x.t === sg.t && (x.bdate === sg.bdate || x.open))) continue;
-      tpn.recent.unshift({t: sg.t, bd: sg.bd, bdate: sg.bdate, bp: sg.bp, sd:'—', ret:0, open:true});
-      store.push({t: sg.t, bd: sg.bd, bdate: sg.bdate, bp: sg.bp});
-      changed = true;
+    for (let k=1; k<=10; k++){
+      const D = new Date(Date.now()-k*86400000);
+      if (D.getDay()===0 || D.getDay()===6) continue;
+      const ds = D.toISOString().slice(0,10);
+      let rows = [];
+      try { const rr = await jget(`https://api-finfo.vndirect.com.vn/v4/stock_prices?sort=code&q=date:gte:${ds}~date:lte:${ds}&size=3000`); rows = rr.data||[]; } catch(e){ continue; }
+      for (const d of rows){
+        const r0 = byT[d.code]; if (!r0) continue;
+      if (BO_CUNG.has(d.code)) continue;
+        const thr = r0.b==='HN' ? 8.8 : 6.3;
+        if (d.pctChange==null || +d.pctChange < thr) continue;
+        if (r0.npatYoY!=null && r0.npatYoY>=0 && r0.npatYoY<25) continue;
+        if (store.some(x=>x.t===d.code && x.bdate===ds)) continue;
+        if (tpn.recent.some(x=>x.t===d.code && (x.bdate===ds || x.open))) continue;
+        const ok = await verifySignalAt(d.code, ds); if (!ok) continue;
+        const bd = ds.slice(8,10)+'/'+ds.slice(5,7)+'/'+ds.slice(2,4);
+        tpn.recent.unshift({t:d.code, bd, bdate:ds, bp:ok.bp, sd:'—', ret:0, open:true});
+        store.push({t:d.code, bd, bdate:ds, bp:ok.bp});
+        changed = true;
+      }
     }
-    if (changed) { saveLiveDeals(store); if (tpn.recent.length > 12) tpn.recent = tpn.recent.slice(0,12); refreshOpenDeals(); }
+    if (changed){ saveLiveDeals(store); if (tpn.recent.length>12) tpn.recent = tpn.recent.slice(0,12); refreshOpenDeals(); }
+    localStorage.setItem(KEY, ''+Date.now());
   } catch(e){}
 }
 function scanNewSignals(){
@@ -514,8 +724,8 @@ function scanNewSignals(){
   const dstr = ('0'+now.getDate()).slice(-2)+'/'+('0'+(now.getMonth()+1)).slice(-2)+'/'+String(now.getFullYear()).slice(2);
   const biso = now.toISOString().slice(0,10);
   const qualify = t => { if (BO_CUNG.has(t)) return false; const r = byT[t]; if (!r) return false;
-    const g = (window.SIGS && window.SIGS.trig && window.SIGS.trig[t]) || null; if (!g) return false;
-    return r.p != null && r.p >= g[0] && r.vx != null && r.v20 && (r.vx * r.v20) >= g[1]; };
+    const thr = r.b === 'HN' ? 8.8 : 6.3;
+    return r.chg != null && r.chg >= thr && r.vx >= 2.0; };
   // tin hieu trong phien rot chuan -> tu rut khoi bang + so
   tpn.recent = tpn.recent.filter(x => !(x.today && x.bdate === biso && !qualify(x.t)));
   let store = loadLiveDeals().filter(x => !(x.bdate === biso && !qualify(x.t)));
@@ -536,23 +746,42 @@ function checkWatchAlerts(){
     if (!liveWatch.inSession()) return;
     ROWS().forEach(r=>{
       if (!r.watch || r.wgrade === 'weak' || r.chg == null) return;
-      const g = (window.SIGS && window.SIGS.trig && window.SIGS.trig[r.t]) || null;
-      if (g && r.p != null && r.p >= g[0]) return;  // da co thong bao TIN HIEU MUA lo
+      const thr = r.b === 'HN' ? 8.8 : 6.3;
+      if (r.chg >= thr) return;  // da co thong bao TIN HIEU MUA lo
       if (r.chg >= 4) notifyPush('W4'+r.t, r.t+' +'+(+r.chg).toFixed(1)+'% — NÓNG MÁY', 'Mã trong vùng theo dõi đang tăng tốc mạnh. Canh chặt tới cuối phiên.', 10*60000);
       else if (r.chg >= 2) notifyPush('W2'+r.t, r.t+' +'+(+r.chg).toFixed(1)+'% — khởi động', 'Mã trong vùng theo dõi bắt đầu chạy. Để mắt.', 15*60000);
     });
   } catch(e){}
 }
 async function refreshOpenDeals(){
-  // dong/mo deal do may phat hanh cap nhat moi phien — o day chi lam moi lai/lo theo gia song
   const tpn = SUM.tpn; if (!tpn || !tpn.recent) return;
-  const opens = tpn.recent.filter(d => d.open && d.bdate);
+  const opens = tpn.recent.filter(d=>d.open && d.bdate);
   if (!opens.length) { renderRecent(); return; }
   const now = NOW();
   await Promise.all(opens.map(async d => { try {
-    const r = await jget(`https://dchart-api.vndirect.com.vn/dchart/history?symbol=${d.t}&resolution=D&from=${now-30*86400}&to=${now}`);
-    const c = r.c; if (!c || !c.length || !(d.bp > 0)) return;
-    d.ret = +(((c[c.length-1]/d.bp - 1)*100) - 0.4).toFixed(1);
+    const bts = Math.floor(new Date(d.bdate+'T00:00:00Z').getTime()/1000);
+    const r = await jget(`https://dchart-api.vndirect.com.vn/dchart/history?symbol=${d.t}&resolution=D&from=${bts-120*86400}&to=${now}`);
+    const c = r.c, tt = r.t; if (!c || c.length < 5) return;
+    let gi = -1; for (let i = 0; i < tt.length; i++){ if (tt[i] >= bts - 43200){ gi = i; break; } }
+    if (gi < 0) return;
+    const fill = c[gi] || d.bp;   // lay close ngay tin hieu tu chuoi da dieu chinh (tranh lech khi chia co tuc/quyen)
+    d.bp = +fill.toFixed(2);
+    const sma = (i,n) => { if (i < n-1) return null; let x = 0; for (let k = i-n+1; k <= i; k++) x += c[k]; return x/n; };
+    let big = false, closed = false;
+    for (let i = gi+3; i < c.length; i++){
+      const h = i-gi, pnl = c[i]/fill-1;
+      if (pnl >= 0.25) big = true;
+      const gate = (h === 3 && pnl <= 0) || pnl <= -0.07;
+      const m20 = sma(i,20), m20p = sma(i-1,20), m10 = sma(i,10), m10p = sma(i-1,10);
+      const brk = big ? (m10 && c[i] < m10 && c[i-1] < m10p) : (h > 3 && m20 && c[i] < m20 && c[i-1] < m20p);
+      if (gate || brk){
+        d.open = false; d.ret = +((pnl*100)-0.4).toFixed(1);
+        const dt = new Date(tt[i]*1000);
+        d.sd = ('0'+dt.getDate()).slice(-2)+'/'+('0'+(dt.getMonth()+1)).slice(-2)+'/'+String(dt.getFullYear()).slice(2);
+        closed = true; break;
+      }
+    }
+    if (!closed){ d.ret = +(((c[c.length-1]/fill-1)*100)-0.15).toFixed(1); }
   } catch(e){} }));
   renderRecent();
 }
@@ -573,6 +802,7 @@ inits.market = async function(){
     <div class="card" style="margin-bottom:0;display:flex;flex-direction:column">
       <h2 style="text-align:center;letter-spacing:.02em">TOP TÍN HIỆU 6 THÁNG QUA</h2>
       <div style="flex:1;overflow:auto" id="recentWrap"></div>
+      <button class="btn-cta" style="width:100%;margin-top:12px" onclick="showView('screener')">KHÁM PHÁ BỘ LỌC 702 MÃ</button>
     </div>
   </div>
   <div style="height:16px"></div>
@@ -1174,13 +1404,18 @@ async function loadDetail(t){
   $('#dTitle').innerHTML = `${t} <span class="mini">— ${r.n||''} (${r.b==='HO'?'HOSE':'HNX'})</span> <span class="spin"></span>`;
   $('#dBody').style.display='';
   try {
-    const [oh, qs, rts] = await Promise.all([api.ohlc(t, 5100), api.kqkd(t), api.ratios(t)]);
+    const [oh, qs, rts] = await Promise.all([
+      api.ohlc(t, 5100),
+      api.kqkd(t).catch(() => []),
+      api.ratios(t).catch(() => [])
+    ]);
+    if (!oh || !oh.c || !oh.c.length) throw new Error('Không có dữ liệu giá từ máy chủ');
     curOhlc = oh;
     // du lieu quy as-of (theo ngay cong bo) — dung cho ca bang KPI va engine tin hieu
     const qsAv = [];
-    qs.forEach(q => {
-      if (!q.publicDate) return;
-      const pv = qs.find(x=>x.yearReport===q.yearReport-1 && x.lengthReport===q.lengthReport);
+    (qs || []).forEach(q => {
+      if (!q || !q.publicDate) return;
+      const pv = qs.find(x=>x && x.yearReport===q.yearReport-1 && x.lengthReport===q.lengthReport);
       let revY = null, npY = null;
       if (pv) {
         const r1 = pickTop(q), r0 = pickTop(pv), n1 = pick(q,NPAT), n0 = pick(pv,NPAT);
@@ -1196,57 +1431,170 @@ async function loadDetail(t){
     if (proLoadedFor && proLoadedFor !== t) { proLoadedFor = null; if (document.getElementById('chartProWrap').style.display !== 'none') loadProChart(); }
     $('#dTitle').innerHTML = `${t} <span class="mini">— ${r.n||''} (${r.b==='HO'?'HOSE':'HNX'})</span>`;
     // KPI
-    const rtsAv = rts.map(x => ({
-      av: Date.UTC(x.yearReport, x.quarter*3, 1)/1000 + 45*86400,  // sau khi het quy ~45 ngay (BCTC ra)
+    const rtsAv = (rts || []).map(x => ({
+      av: x._av != null ? x._av : Date.UTC(x.yearReport, x.quarter*3, 1)/1000 + 45*86400,  // sau khi het quy ~45 ngay (BCTC ra); dong "hien tai" cua VNDirect co av rieng
       pe: x.pe, pb: x.pb, cap: x.marketCap, roe: x.roe
     })).sort((a,b)=>a.av-b.av);
     dtData = {oh, qsAv, rtsAv};
     updateKpis(null);
     drawPrice(14);
     if (document.getElementById('chartProWrap').style.display !== 'none') loadProChart();
-    drawFund(r, qs, rts);
+    drawFund(r, qs || [], rts || []);
     renderDHead();
     window._recFor = null;
     const _at = document.querySelector('#dTabs button.active');
     if (_at && _at.dataset.t==='rec') loadRecs();
     if (_at && _at.dataset.t==='sig') renderSigTab();
-  } catch(e){ toast('Lỗi tải dữ liệu '+t+': '+e.message); }
+  } catch(e){
+    $('#dTitle').innerHTML = `${t} <span class="mini">— ${r.n||''} (${r.b==='HO'?'HOSE':'HNX'})</span>`;
+    toast('Lỗi tải dữ liệu '+t+': '+e.message);
+  }
 }
 // ===== B★: nang cap hien thi diem mua dat chuan nen co hep + thi truong thuan (display-only) =====
 let __ixSD=null, __ixSI=null;
-(async()=>{ try{ const to2=NOW()+86400; __ixSD=await jget(`https://dchart-api.vndirect.com.vn/dchart/history?symbol=VNINDEX&resolution=D&from=${to2-86400*5100}&to=${to2}`); __ixSI={}; __ixSD.t.forEach((ts,k2)=>__ixSI[ts]=k2); }catch(e){} })();
+(async()=>{ try{ const to2=NOW()+86400; __ixSD=await jget(`https://dchart-api.vndirect.com.vn/dchart/history?symbol=VNINDEX&resolution=D&from=${to2-86400*5100}&to=${to2}`); __ixSI={}; if(__ixSD && __ixSD.t) __ixSD.t.forEach((ts,k2)=>__ixSI[ts]=k2); }catch(e){} })();
 function __ixMA50S(ts){ if(!__ixSD||!__ixSI) return null; const j2=__ixSI[ts]; if(j2==null||j2<49) return null; let s2=0; for(let k2=j2-49;k2<=j2;k2++) s2+=__ixSD.c[k2]; return {c:__ixSD.c[j2], ma:s2/50}; }
-function starTPN(mk, oh){ /* da tinh san tren may phat hanh */ }
+function starTPN(mk, oh){ try{
+ const c2=oh.c, tt2=oh.t; const ixm={}; tt2.forEach((ts,i2)=>ixm[ts]=i2);
+ mk.forEach(m=>{ if(m.text!=='BUY') return;
+  const i2=ixm[m.time]; if(i2==null||i2<=40) return;
+  let h1=-1e9,l1=1e9,h3=-1e9,l3=1e9;
+  for(let k2=i2-10;k2<i2;k2++){ if(c2[k2]>h1)h1=c2[k2]; if(c2[k2]<l1)l1=c2[k2]; }
+  for(let k2=i2-30;k2<i2;k2++){ if(c2[k2]>h3)h3=c2[k2]; if(c2[k2]<l3)l3=c2[k2]; }
+  const r10=(h1-l1)/l1*100, r30=(h3-l3)/l3*100;
+  if(!(r30>0 && r10<=0.6*r30)) return;
+  const m50=__ixMA50S(m.time); if(m50!=null && !(m50.c>m50.ma)) return;
+  m.text='BUY\u2605';
+ }); }catch(e){} }
 // ===== Khoa Nguyen Signal engine v2 =====
 function computeTPN(oh, boardCode, qsAv){
-  // Tin hieu tinh san tren may phat hanh, cong bo qua signals_data.js — trinh duyet chi hien thi
-  const S = (window.SIGS && window.SIGS.t && window.SIGS.t[curT]) || null;
+  // xep hang do tin cay tin hieu theo du lieu co ban as-of (chi tiet thuat toan khong cong bo)
+  const npYAt = ts => { let y = null; (qsAv||[]).forEach(q => { if (q.pub <= ts) y = q.npY; }); return y; };
+  const gradeAt = ts => { const y = npYAt(ts); return (y != null && y >= 0 && y < 25) ? 0 : 1; };
+  const c = oh.c, v = oh.v, t = oh.t, n = c.length;
+  const ceilThr = boardCode === 'HN' ? 8.8 : 6.3;
   const markers = [];
-  if (S && S.m) S.m.forEach(x => {
-    const ts = x[0], k = x[1], tx = x[2];
-    if (k === 'S') markers.push({time: ts, position:'aboveBar', color:'#e5484d', shape:'arrowDown', text: tx || ''});
-    else { const MP = {B:['#18a34b','BUY'], X:['#18a34b','BUY\u2605'], T:['#b45309','THIN'], A:['#67c98b','ADD'], W:['#b45309','WEAK']};
-      const mm = MP[k] || MP.B;
-      markers.push({time: ts, position:'belowBar', color: mm[0], shape:'arrowUp', text: mm[1]}); }
-  });
-  return {markers, state: (S && S.st) || null};
+  const ma20 = [], v20 = [];
+  for (let i = 0; i < n; i++) {
+    if (i >= 19) {
+      let s = 0, sv = 0;
+      for (let k = i-19; k <= i; k++) { s += c[k]; sv += v[k]; }
+      ma20.push(s/20); v20.push(sv/20);
+    } else { ma20.push(null); v20.push(null); }
+  }
+  const ma10 = [], hi10 = [];
+  for (let i = 0; i < n; i++) {
+    if (i >= 9) { let s2 = 0, hh = -1e9; for (let k = i-9; k <= i; k++) { s2 += c[k]; if (c[k] > hh) hh = c[k]; } ma10.push(s2/10); hi10.push(hh); }
+    else { ma10.push(null); hi10.push(null); }
+  }
+  const baseInfo = i => {   // thong tin nen 30 phien truoc bar i
+    let hi = -1e9, lo = 1e9, hasCeil = false;
+    for (let k = i-30; k < i; k++) {
+      if (c[k] > hi) hi = c[k]; if (c[k] < lo) lo = c[k];
+      if (k > 0 && (c[k]/c[k-1]-1)*100 >= ceilThr) hasCeil = true;
+    }
+    return {rng: (hi-lo)/lo*100, hasCeil};
+  };
+  let inPos = false, fill = 0, ei = 0, lastWeakIdx = -9, big = false, added = false;
+  for (let i = 31; i < n; i++) {
+    if (!inPos) {
+      const chg = (c[i]/c[i-1]-1)*100;
+      if (chg < ceilThr) continue;
+      if (!v20[i] || v[i] < 2.0*v20[i]) continue;
+      if (c[i]*v20[i]/1e6 < 15) continue;
+      const b = baseInfo(i);
+      if (b.hasCeil || b.rng > 12) continue;
+      if (!gradeAt(t[i])) {
+        // tin hieu YEU: chi hien thi doc lap — KHONG mo vi the, khong anh huong model chinh
+        lastWeakIdx = i;
+        markers.push({time: t[i], position:'belowBar', color:'#b45309', shape:'arrowUp', text:'WEAK'});
+        continue;
+      }
+      inPos = true; fill = c[i]; ei = i; big = false; added = false;
+      markers.push({time: t[i], position:'belowBar', color: (b.rng < 5 ? '#b45309' : '#18a34b'), shape:'arrowUp', text: (b.rng < 5 ? 'THIN' : 'BUY')});
+    } else {
+      const h = i - ei, pnl = c[i]/fill - 1;
+      if (pnl >= 0.25) big = true;
+      if (!added && h > 3 && h <= 7 && pnl >= 0.10 && hi10[i] && c[i] >= hi10[i]*0.999) {
+        added = true;
+        markers.push({time: t[i], position:'belowBar', color:'#67c98b', shape:'arrowUp', text:'ADD'});
+      }
+      let reason = null;
+      if (h === 3 && pnl <= 0) reason = 'T+3';
+      else if (h >= 3 && pnl <= -0.07) reason = 'CL7';
+      else if (big && ma10[i] && c[i] < ma10[i] && c[i-1] < ma10[i-1]) reason = 'MA10';
+      else if (!big && h > 3 && ma20[i] && c[i] < ma20[i] && c[i-1] < ma20[i-1]) reason = 'MA20';
+      if (reason) {
+        markers.push({time: t[i], position:'aboveBar', color:'#e5484d', shape:'arrowDown', text: (pnl>0?'+':'') + (pnl*100).toFixed(0) + '%'});
+        inPos = false;
+      }
+    }
+  }
+  // trang thai hien tai (bar cuoi)
+  const L = n-1, b = baseInfo(L+0), chgL = (c[L]/c[L-1]-1)*100;
+  const state = {
+    inPos, gtgd: v20[L] ? c[L]*v20[L]/1e6 : 0, volx: v20[L] ? v[L]/v20[L] : 0,
+    rng: b.rng, hasCeil: b.hasCeil, chg: chgL, ma20: ma20[L], close: c[L], ceilThr,
+    buyToday: !inPos ? false : ei === L, fill, holdDays: inPos ? L-ei : 0,
+    pnl: inPos ? (c[L]/fill-1)*100 : 0, buyDate: inPos ? new Date(t[ei]*1000).toISOString().slice(0,10) : null,
+    belowMa20: ma20[L] ? c[L] < ma20[L] : false,
+    weakToday: lastWeakIdx === L,
+    v20L: v20[L] || 0, closePrev: L>0 ? c[L-1] : c[L], v20Prev: L>0 ? (v20[L-1]||v20[L]||0) : (v20[L]||0), lastBarTs: t[L],
+    hi10L: hi10[L] || null, ma10L: ma10[L] || null, ma20L: ma20[L] || null,
+    bigPos: inPos ? big : false, addedPos: inPos ? added : false,
+    faOK: gradeAt(t[L])
+  };
+  return {markers, state};
 }
 let curMarkers = [];
 function renderTPN(s){
   const el = document.getElementById('dTpn');
   if (!el) return;
   let chip, desc;
-  if (s && s.c) {
-    chip = s.c; desc = s.dA || '';
-    try {
-      if (s.dL != null && s.ts) {
-        const nv = new Date(), lb = new Date(s.ts*1000);
-        const dow = nv.getDay();
-        const phienMoi = dow >= 1 && dow <= 5 && lb.toDateString() !== nv.toDateString() && (nv.getHours() + nv.getMinutes()/60) < 15;
-        if (phienMoi) desc = s.dL;
+  const f2 = x => x >= 100 ? x.toFixed(1) : x.toFixed(2);
+  if (s.inPos && s.buyToday) {
+    chip = ['TÍN HIỆU MUA HÔM NAY', '#e7f6ec', '#128a3e'];
+    desc = `Vào lệnh ngay trong phiên tại ${f2(s.fill)}. T+3 hệ thống sẽ phán quyết giữ/bán khi hàng về.`;
+  }
+  else if (s.inPos) {
+    chip = [`ĐANG NẮM GIỮ — T+${s.holdDays}, ${s.pnl>0?'+':''}${s.pnl.toFixed(1)}%`, s.pnl>0?'#e7f6ec':'#fdecec', s.pnl>0?'#128a3e':'#e5484d'];
+    const stop7 = s.fill*0.93;
+    const maLv = s.bigPos ? s.ma10L : s.ma20L;
+    const maName = s.bigPos ? 'MA10' : 'MA20';
+    const belowMa = maLv ? s.close < maLv : false;
+    let parts = [`Giá vốn ${f2(s.fill)}.`];
+    if (s.holdDays < 3) {
+      parts.push(`Chờ hàng về — T+3: đóng cửa ≤ ${f2(s.fill)} là BÁN toàn bộ.`);
+      parts.push(`Van cắt lỗ: đóng dưới ${f2(stop7)} (−7%).`);
+    } else {
+      if (!s.addedPos && s.holdDays >= 3 && s.holdDays < 7) {
+        const addTrig = Math.max(s.fill*1.10, s.hi10L || 0);
+        parts.push(`BỒI (1 lần): nếu đóng cửa ≥ ${f2(addTrig)} → mua thêm nửa suất.`);
       }
-    } catch(e){}
-  } else { chip = ['CHƯA CÓ TÍN HIỆU', '#f3f5f7', '#6b7280']; desc = ''; }
+      let sells = [`đóng ≤ ${f2(stop7)} (cắt lỗ −7%)`];
+      if (maLv) sells.push(belowMa
+        ? `đóng dưới ${f2(maLv)} (hôm qua đã vi phạm — hôm nay đóng dưới là BÁN)`
+        : `đóng dưới ${f2(maLv)} hai phiên liên tiếp`);
+      parts.push(`BÁN cuối phiên nếu: ` + sells.join(' · ') + '.');
+      if (s.bigPos) parts.push(`Deal lãi lớn — van bán đang ở chế độ siết chặt.`);
+      parts.push(`Các ngưỡng tự cập nhật theo từng phiên.`);
+    }
+    desc = parts.join(' ');
+  }
+  else if (s.weakToday) { chip = ['TÍN HIỆU YẾU (WEAK) — ĐỨNG NGOÀI', '#fef6e7', '#b45309']; desc = `Có tín hiệu kỹ thuật trong phiên nhưng bộ xếp hạng AI đánh giá độ tin cậy thấp — không khuyến nghị vào lệnh.`; }
+  else if (!s.hasCeil && s.rng <= 12 && s.gtgd >= 15) {
+    chip = s.faOK ? ['VÙNG THEO DÕI — CHỜ ĐIỂM MUA', '#fef9e7', '#b45309'] : ['VÙNG THEO DÕI — HẠNG YẾU', '#f3f5f7', '#6b7280'];
+    const nowVN = new Date();
+    const lastBarDay = new Date(s.lastBarTs*1000).toDateString();
+    const isLive = lastBarDay === nowVN.toDateString() && (nowVN.getHours() + nowVN.getMinutes()/60) < 15;
+    const refPx = isLive ? s.closePrev : s.close;
+    const refV20 = isLive ? s.v20Prev : s.v20L;
+    const buyPx = refPx*(1+s.ceilThr/100);
+    desc = s.faOK
+      ? `MUA nếu ${isLive ? 'HÔM NAY' : 'phiên tới'} đóng cửa ≥ ${f2(buyPx)} kèm khối lượng tối thiểu ${(2*refV20/1e6).toFixed(1)} triệu cp. Ngưỡng trailing tự cập nhật mỗi phiên.`
+      : `Nền kỹ thuật đạt chuẩn nhưng bộ xếp hạng AI đánh giá hạng YẾU — nếu bùng nổ cũng chỉ mang tính quan sát, không khuyến nghị vào lệnh. Hạng sẽ được chấm lại khi có báo cáo quý mới.`;
+  }
+  else { chip = ['CHƯA CÓ TÍN HIỆU', '#f3f5f7', '#6b7280']; desc = ''; }
   el.innerHTML = `<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
     <span class="tag" style="background:${chip[1]};color:${chip[2]};font-size:14px;padding:6px 14px">${chip[0]}</span>
     <span class="mini">${desc}</span></div>`;
@@ -1299,11 +1647,11 @@ function drawFund(r, qs, rts){
   if (r.roe!=null) cur.push(`ROE hiện tại (TTM): <b>${fmt(r.roe,1)}%</b>`);
   $('#dFundCur').innerHTML = cur.join(' &nbsp;·&nbsp; ');
   window.__FIN_BANK = !!(qs && qs.some(function(x){ return x && x.isb38; }));
-  const last12 = qs.slice(-12);
-  const rtByQ = {}; rts.forEach(x=>{ rtByQ[x.yearReport+'Q'+x.quarter] = x; });
+  const last12 = (qs || []).slice(-12);
+  const rtByQ = {}; (rts || []).forEach(x=>{ if (x) rtByQ[x.yearReport+'Q'+x.quarter] = x; });
   const cols = last12.map(q => {
     const key = q.yearReport+'Q'+q.lengthReport;
-    const pv = qs.find(x=>x.yearReport===q.yearReport-1 && x.lengthReport===q.lengthReport);
+    const pv = qs.find(x=>x && x.yearReport===q.yearReport-1 && x.lengthReport===q.lengthReport);
     const rev = pickTop(q), np = pick(q,NPAT);
     const rev0 = pv?pickTop(pv):null, np0 = pv?pick(pv,NPAT):null;
     const rt = rtByQ[key] || {};
@@ -1316,17 +1664,21 @@ function drawFund(r, qs, rts){
   const cell = (v,d,suf='',color=false) => v==null ? '<td class="mut">--</td>' : `<td class="${color?cls(v):''}">${(color&&v>0?'+':'')+fmt(v,d)+suf}</td>`;
   const trend = cols.map((c,i)=>{ if (i===0 || c.yln==null || cols[i-1].yln==null) return '<td class="mut">--</td>';
     return c.yln>=cols[i-1].yln ? '<td><span class="chip g">Tăng tốc ▲</span></td>' : '<td><span class="chip r">Giảm tốc ▼</span></td>'; });
-  $('#tbFund').innerHTML =
-    '<tr><th style="text-align:left">Quý</th>'+cols.map(c=>`<th>${c.lb}</th>`).join('')+'</tr>'
-    +'<tr><td style="text-align:left"><b>'+__fRN()+' (tỷ)</b></td>'+cols.map(c=>cell(c.rev,1)).join('')+'</tr>'
-    +'<tr><td style="text-align:left"><b>LNST (tỷ)</b></td>'+cols.map(c=>cell(c.np,1)).join('')+'</tr>'
-    +'<tr><td style="text-align:left">%YoY '+__fRS()+'</td>'+cols.map(c=>cell(c.ydt,1,'%',true)).join('')+'</tr>'
-    +'<tr><td style="text-align:left">%YoY LN</td>'+cols.map(c=>cell(c.yln,1,'%',true)).join('')+'</tr>'
-    +'<tr><td style="text-align:left">ROE (%)</td>'+cols.map(c=>cell(c.roe,1,'%',true)).join('')+'</tr>'
-    +'<tr><td style="text-align:left">Xu hướng LN</td>'+trend.join('')+'</tr>'
-    +'<tr><td style="text-align:left">P/E</td>'+cols.map(c=>cell(c.pe,2)).join('')+'</tr>'
-    +'<tr><td style="text-align:left">P/B</td>'+cols.map(c=>cell(c.pb,2)).join('')+'</tr>';
-  drawFundCharts(cols);
+  if (cols.length > 0) {
+    $('#tbFund').innerHTML =
+      '<tr><th style="text-align:left">Quý</th>'+cols.map(c=>`<th>${c.lb}</th>`).join('')+'</tr>'
+      +'<tr><td style="text-align:left"><b>'+__fRN()+' (tỷ)</b></td>'+cols.map(c=>cell(c.rev,1)).join('')+'</tr>'
+      +'<tr><td style="text-align:left"><b>LNST (tỷ)</b></td>'+cols.map(c=>cell(c.np,1)).join('')+'</tr>'
+      +'<tr><td style="text-align:left">%YoY '+__fRS()+'</td>'+cols.map(c=>cell(c.ydt,1,'%',true)).join('')+'</tr>'
+      +'<tr><td style="text-align:left">%YoY LN</td>'+cols.map(c=>cell(c.yln,1,'%',true)).join('')+'</tr>'
+      +'<tr><td style="text-align:left">ROE (%)</td>'+cols.map(c=>cell(c.roe,1,'%',true)).join('')+'</tr>'
+      +'<tr><td style="text-align:left">Xu hướng LN</td>'+trend.join('')+'</tr>'
+      +'<tr><td style="text-align:left">P/E</td>'+cols.map(c=>cell(c.pe,2)).join('')+'</tr>'
+      +'<tr><td style="text-align:left">P/B</td>'+cols.map(c=>cell(c.pb,2)).join('')+'</tr>';
+    drawFundCharts(cols);
+  } else {
+    $('#tbFund').innerHTML = '<tr><td style="text-align:center;padding:12px;color:var(--muted)">Dữ liệu BCTC chi tiết 12 quý đang được đồng bộ. Các chỉ số cơ bản hiển thị tại bảng Tổng quan bên trên.</td></tr>';
+  }
 }
 
 function __fnn(a){ return a.filter(function(v){ return v!=null && !isNaN(v); }); }
@@ -1669,7 +2021,7 @@ function __finOpen(cid){
       '<div class="mtit">' + (tit ? tit.innerHTML : '') + '</div>'
       + '<div class="fhero">' + (hero ? hero.innerHTML : '') + '</div>';
     document.getElementById('finModalIns').innerHTML = ins ? ins.innerHTML : '';
-    document.getElementById('finModalFoot').textContent = 'Khoa Nguyen Invest \u00b7 khoanguyeninvest.vn';
+    document.getElementById('finModalFoot').textContent = 'Khoa Nguyen Invest \u00b7 khoakafi.github.io';
     __finBack = { box: box, parent: box.parentNode, next: box.nextSibling };
     __finCurId = cid;
     document.getElementById('finModalSlot').appendChild(box);
@@ -1933,8 +2285,8 @@ const liveWatch = {
       const rw = byT[m.t]; if (rw) { rw._lv = chg; rw._lvv = volR; }
       const cell = document.getElementById('lv_'+m.t);
       if (cell) { cell.textContent = (chg>=0?'+':'')+chg.toFixed(1)+'%' + (volR>=1.5?' · KL x'+volR.toFixed(1):''); cell.className = chg>=3?'up':(chg<=-2?'down':'mut'); }
-      const g = (window.SIGS && window.SIGS.trig && window.SIGS.trig[m.t]) || null;
-      if (g && px >= g[2] && m.v20 && (v[v.length-1]/elapsed) >= g[3]) { hot++; this.notify('L2'+m.t, m.t+' '+(chg>=0?'+':'')+chg.toFixed(1)+'% kèm dòng tiền mạnh', 'Tín hiệu MUA có thể kích hoạt cuối phiên — mở dashboard kiểm tra ngay.', 5*60000); }
+      const thr = m.b==='HN' ? 8.8 : 6.3;
+      if (chg >= thr-0.15 && volR >= 1.8) { hot++; this.notify('L2'+m.t, m.t+' '+(chg>=0?'+':'')+chg.toFixed(1)+'% kèm dòng tiền mạnh', 'Tín hiệu MUA có thể kích hoạt cuối phiên — mở dashboard kiểm tra ngay.', 5*60000); }
       else if (chg >= 4) { hot++; this.notify('W4'+m.t, m.t+' +'+chg.toFixed(1)+'% — NÓNG MÁY', 'Mã trong vùng theo dõi đang tăng tốc mạnh. Canh chặt tới cuối phiên.', 10*60000); }
       else if (chg >= 2) { hot++; this.notify('W2'+m.t, m.t+' +'+chg.toFixed(1)+'% — khởi động', 'Mã trong vùng theo dõi bắt đầu chạy. Để mắt.', 15*60000); }
     } catch(e){} };
@@ -1943,12 +2295,133 @@ const liveWatch = {
     if (st) st.textContent = 'Quét lúc ' + new Date().toTimeString().slice(0,5) + ' — đang lọc trực chiến: ' + shown + ' mã tăng ≥2% / ' + this.list.length + ' mã nền' + (hot ? ' · ' + hot + ' mã nóng' : '');
   }
 };
-async function pushDataToGitHub(){ /* da chuyen sang may phat hanh rieng */ }
-async function maybeAutoPublish(){ /* da chuyen sang may phat hanh rieng */ }
-try { const _b = document.getElementById('btnRefresh'); if (_b) _b.style.display = 'none'; } catch(e){}
+async function pushDataToGitHub(){
+  const tk = localStorage.getItem('kafi_gh_token'); if (!tk) return false;
+  const st = document.getElementById('refreshStatus');
+  try {
+    if (st) st.innerHTML = '<span class="spin"></span> đang phát hành dữ liệu cho mọi khách…';
+    const apiU = 'https://api.github.com/repos/khoakafi/khoakafi.github.io/contents/dashboard_data.js';
+    const H = { 'Authorization': 'Bearer ' + tk, 'Accept': 'application/vnd.github+json' };
+    let cur = null;
+    try { cur = JSON.parse(await fetch(apiU, { headers: H }).then(r => r.text())); } catch(_) {}
+    if (!cur || !cur.sha) {
+      const tr2 = await fetch('https://api.github.com/repos/khoakafi/khoakafi.github.io/git/trees/main?recursive=1', { headers: H }).then(r => r.json());
+      const it = ((tr2 && tr2.tree) || []).find(x => x.path === 'dashboard_data.js');
+      if (!it) throw new Error('Khong tim thay sha dashboard_data.js');
+      cur = { sha: it.sha };
+    }
+    const content = 'window.SUMMARY=' + JSON.stringify(SUM) + ';';
+    const b64 = btoa(unescape(encodeURIComponent(content)));
+    const res = await fetch(apiU, { method: 'PUT', headers: H, body: JSON.stringify({ message: 'Auto data publish ' + SUM.updated, content: b64, sha: cur.sha }) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (st) st.textContent = 'Đã phát hành dữ liệu mới cho tất cả khách truy cập';
+    try { const vnOk = new Date(Date.now() + (7*60 + new Date().getTimezoneOffset())*60000); localStorage.setItem('kafi_autopub', vnOk.toISOString().slice(0,10)); localStorage.removeItem('kafi_autopub_fail'); } catch(_) {}
+    return true;
+  } catch(e) { if (st) st.textContent = 'Phát hành lỗi: ' + e.message; try { localStorage.setItem('kafi_autopub_fail', String(Date.now())); } catch(_) {} return false; }
+}
+async function maybeAutoPublish(){
+  try {
+    if (!localStorage.getItem('kafi_gh_token')) return;
+    const vnNow = new Date(Date.now() + (7*60 + new Date().getTimezoneOffset())*60000);
+    const today = vnNow.toISOString().slice(0,10);
+    if (localStorage.getItem('kafi_autopub') === today) return;
+    const h = vnNow.getHours() + vnNow.getMinutes()/60;
+    if (h < 15.75) return;
+    const m = (SUM.updated || '').match(/\d{4}-\d{2}-\d{2}/);
+    if (m && m[0] >= today) return;
+    if (Date.now() - (+(localStorage.getItem('kafi_autopub_fail')||0)) < 3600000) return;
+    window._autoRefresh = true;
+    const b = document.getElementById('btnRefresh'); if (b) b.click();
+  } catch(e){}
+}
+$('#btnRefresh').onclick = async function(){
+  if (!window._autoRefresh && !confirm('Tải lại toàn bộ dữ liệu 702 mã từ API? Mất khoảng 1-2 phút.')) return;
+  window._autoRefresh = false;
+  ga('refresh_data');
+  this.disabled = true; const st = $('#refreshStatus');
+  try {
+    const list = SUM.rows.map(r=>({t:r.t, b:r.b==='HO'?'HOSE':'HNX', n:r.n}));
+    const out = []; const CONC = 6;
+    const sma = (a,n)=>a.length>=n?a.slice(-n).reduce((x,y)=>x+y,0)/n:null;
+    const one = async tk => { try {
+      const now = NOW();
+      const [oh, qsArr, rts] = await Promise.all([
+        jget(`https://dchart-api.vndirect.com.vn/dchart/history?symbol=${tk.t}&resolution=D&from=${now-86400*420}&to=${now}`),
+        api.kqkd(tk.t), api.ratios(tk.t)
+      ]);
+      const c = oh.c||[], v = oh.v||[], o = {t:tk.t, b:tk.b==='HOSE'?'HO':'HN', n:tk.n};
+      if (c.length>30) { const last = c[c.length-1]; o.p = last;
+        o.chg = c[c.length-2] ? +((last/c[c.length-2]-1)*100).toFixed(2) : null;
+        o.hi52 = Math.max(...c); o.lo52 = Math.min(...c); o.dHi = +((last/o.hi52-1)*100).toFixed(1);
+        o.ma20 = +(last/sma(c,20)-1).toFixed(3); o.ma50 = c.length>=50?+(last/sma(c,50)-1).toFixed(3):null; o.ma200 = c.length>=200?+(last/sma(c,200)-1).toFixed(3):null;
+        const rr = rsiS(c); o.rsi = rr[rr.length-1]!=null?Math.round(rr[rr.length-1]):null;
+        o.v20 = Math.round(sma(v,20)||0); o.vx = o.v20?+(v[v.length-1]/o.v20).toFixed(2):null;
+        o.val20 = Math.round((sma(v,20)||0)*last/1000);
+        const ret = n => c.length>n?+((last/c[c.length-1-n]-1)*100).toFixed(1):null;
+        o.r3 = ret(63); o.r6 = ret(126); o.r12 = ret(250);
+        // trạng thái vùng theo dõi của engine tín hiệu (chi tiết thuật toán không công bố)
+        if (c.length>32 && (o.val20||0)>=15000) {
+          const thr = o.b==='HN'?8.8:6.3; const L2 = c.length-1;
+          let hi=-1e9, lo=1e9, hc=false;
+          for (let k=L2-29;k<=L2;k++){ if(c[k]>hi)hi=c[k]; if(c[k]<lo)lo=c[k]; if(k>0&&(c[k]/c[k-1]-1)*100>=thr)hc=true; }
+          const rng=(hi-lo)/lo*100;
+          if (!hc && rng<=12) { o.watch=1; o.wrng=+rng.toFixed(1); o.wdb=+((c[L2]/hi-1)*100).toFixed(1);  let h1=-1e9,l1=1e9; for (let k=L2-9;k<=L2;k++){ if(c[k]>h1)h1=c[k]; if(c[k]<l1)l1=c[k]; } const rg1=(h1-l1)/l1*100; o.wstar=(rng>0 && rg1/rng<=0.6)?1:0; }
+        } }
+      const qs = qsArr;
+      if (qs.length) { const rev = qs.map(x=>pickTop(x)), np2 = qs.map(x=>pick(x,NPAT)); const n = qs.length;
+        o.q = qs.slice(-9).map((x,i,arr)=>{ const idx = n-arr.length+i; return [x.yearReport,x.lengthReport,rev[idx],np2[idx]]; });
+        if (n>=5 && np2[n-5]!=null && np2[n-1]!=null && np2[n-5]!==0) o.npatYoY = +((np2[n-1]/Math.abs(np2[n-5])-1)*100).toFixed(1);
+        if (n>=5 && rev[n-5] && rev[n-1]!=null) o.revYoY = +((rev[n-1]/Math.abs(rev[n-5])-1)*100).toFixed(1);
+        if (n>=17) { const a = np2.slice(n-4).reduce((x,y)=>x+(y||0),0), b = np2.slice(n-16,n-12).reduce((x,y)=>x+(y||0),0); if (a>0&&b>0) o.cagr3 = +((Math.pow(a/b,1/3)-1)*100).toFixed(1); } }
+      if (rts.length) { const L = rts[rts.length-1];
+        o.pe = L.pe!=null?+L.pe.toFixed(2):null; o.pb = L.pb!=null?+L.pb.toFixed(2):null;
+        o.roe = L.roe!=null?+(L.roe*100).toFixed(1):null; o.roa = L.roa!=null?+(L.roa*100).toFixed(1):null;
+        o.cap = L.marketCap?Math.round(L.marketCap/1e9):null; o.dte = L.debtToEquity!=null?+L.debtToEquity.toFixed(2):null;
+        o.gm = L.grossMargin!=null?+(L.grossMargin*100).toFixed(1):null; o.dy = L.dividendYield!=null?+(L.dividendYield*100).toFixed(2):null; }
+      if (o.watch) o.wgrade = (o.npatYoY!=null && o.npatYoY>=0 && o.npatYoY<25) ? 'weak' : 'strong';
+      out.push(o);
+    } catch(e){} };
+    for (let i=0;i<list.length;i+=CONC) { await Promise.all(list.slice(i,i+CONC).map(one)); st.innerHTML = `<span class="spin"></span> ${Math.min(i+CONC,list.length)}/${list.length} mã…`; }
+    // RS + CANSLIM — RS chỉ xếp hạng trong nhóm thanh khoản >= 10 tỷ/ngày để không bị nhiễu bởi mã rác
+    const score = r => (r.r3!=null?0.4*r.r3:0)+(r.r6!=null?0.3*r.r6:0)+(r.r12!=null?0.3*r.r12:0);
+    const sorted = out.filter(r=>r.p!=null && (r.val20||0)>=10000).map(r=>({t:r.t,s:score(r)})).sort((a,b)=>a.s-b.s);
+    const rk = {}; sorted.forEach((x,i)=>rk[x.t]=Math.max(1,Math.round((i+1)/sorted.length*99)));
+    for (const r of out) { r.rs = rk[r.t]||null;
+      r.cs = {C:r.npatYoY>=25?1:0, A:(r.cagr3||0)>=20?1:0, N:(r.dHi??-99)>=-15?1:0, S:(r.vx||0)>=1.2?1:0, L:(r.rs||0)>=70?1:0, I:(r.val20||0)>=5000?1:0};
+      r.csTong = Object.values(r.cs).reduce((a,b)=>a+b,0); }
+    SUM = {updated: new Date().toISOString().slice(0,16).replace('T',' ')+' (trình duyệt)', nTickers: out.length, rows: out, tpn: SUM.tpn || window.SUMMARY.tpn};
+    try { localStorage.setItem('summary_v1', JSON.stringify(SUM)); } catch(e){}
+    Object.keys(byT).forEach(k=>delete byT[k]); SUM.rows.forEach(r=>byT[r.t]=r);
+    $('#bgeData').textContent = 'Dữ liệu screener: ' + SUM.updated;
+    st.textContent = '\u2713 Đã cập nhật ' + out.length + ' mã';
+    pushDataToGitHub();
+    scInit = false; mktDone = false;
+    const cur = views.find(v=>$('#view-'+v).style.display!=='none');
+    inits[cur] && inits[cur]();
+  } catch(e){ st.textContent = 'Lỗi: '+e.message; }
+  this.disabled = false;
+};
 
 // ================= KHỞI ĐỘNG =================
 (async () => { try { await liveQuote(); mergeLiveDeals(); scanNewSignals(); checkWatchAlerts(); } catch(e){} inits.market(); ensureNotifBanner(); ensureFreshBanner(); retroScanSignals();
+  if (location.search.indexOf('setup_publish') >= 0) {
+    const t = prompt('Dán GitHub token (fine-grained, quyền Contents Read&Write của repo khoakafi.github.io) để biến máy này thành máy phát hành:');
+    if (t) { localStorage.setItem('kafi_gh_token', t.trim()); alert('Đã lưu. Từ giờ máy này mở trang sau 15h45 sẽ tự cập nhật dữ liệu và phát hành cho mọi khách.'); }
+  }
+  try {
+    if (localStorage.getItem('kafi_gh_token')) {
+      const vnB = new Date(Date.now() + (7*60 + new Date().getTimezoneOffset())*60000);
+      const lastTrade = new Date(vnB);
+      if (vnB.getHours() + vnB.getMinutes()/60 < 15.75) lastTrade.setDate(lastTrade.getDate()-1);
+      while (lastTrade.getDay()===0 || lastTrade.getDay()===6) lastTrade.setDate(lastTrade.getDate()-1);
+      const need = lastTrade.toISOString().slice(0,10);
+      const mU = (SUM.updated||'').match(/\d{4}-\d{2}-\d{2}/);
+      if (!mU || mU[0] < need) {
+        const elW = document.getElementById('refreshStatus');
+        if (elW) elW.innerHTML = '<b style="color:#e5484d">⚠ Khách đang xem dữ liệu ' + (mU?mU[0]:'?') + ', chưa phát hành phiên ' + need + ' — bấm "Cập nhật dữ liệu" (ngày lễ thì bỏ qua cảnh báo này).</b>';
+      }
+    }
+  } catch(_) {}
   maybeAutoPublish();
 })();
 setInterval(async () => { if (await liveQuote()) { renderTops(); scanNewSignals(); checkWatchAlerts(); renderRecent(); syncLiveBar(); try { if (!window.__dHov) updateDPx(null); } catch(e){} } maybeAutoPublish(); }, 120000);
@@ -1989,7 +2462,7 @@ setInterval(async () => { if (await liveQuote()) { renderTops(); scanNewSignals(
       +'#newsBody .cta{display:flex;gap:12px;flex-wrap:wrap;margin:24px 0 8px}'
       +'#newsBody .cta a{text-decoration:none;font-weight:700;font-size:15px;padding:11px 20px;border-radius:10px}'
       +'#newsBody .cta .p{background:#18a34b;color:#fff}#newsBody .cta .s{border:1.5px solid #18a34b;color:#128A3E}'
-      +'#newsBody .disc{display:none}#newsBody .cta a[href="https://khoakafi.github.io/"],#newsBody .cta a[href="https://khoanguyeninvest.vn/"]{display:none}'
+      +'#newsBody .disc{display:none}#newsBody .cta a[href="https://khoakafi.github.io/"]{display:none}'
       +'</style>';
     d.innerHTML = css
       + '<div class="card" style="padding:18px 20px" id="newsListCard">'
@@ -2016,7 +2489,7 @@ setInterval(async () => { if (await liveQuote()) { renderTops(); scanNewSignals(
       if (r && r.style.display !== 'none' && location.pathname.indexOf('/bai-viet/') < 0){ window.__closeArt(true); }
     });
     window.__openArt = async function(url, slug){
-      try{ url = new URL(url, location.origin + '/').href; }catch(e){}
+      try{ url = new URL(url, 'https://khoakafi.github.io/').href; }catch(e){}
       try{ ga('view_article', {slug: slug}); }catch(e){}
       const el = document.getElementById('newsBody');
       el.innerHTML = '<div class="mini" style="padding:30px 0">\u0110ang t\u1ea3i b\u00e0i\u2026</div>';
