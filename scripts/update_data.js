@@ -1,5 +1,5 @@
 // Auto-update dashboard_data.js — chay boi GitHub Actions moi ngay sau phien
-// Port tu logic "Cap nhat du lieu" cua dashboard_app.js. Giu nguyen khoi tpn (hieu suat).
+// Su dung VNDirect Dchart (gia) + VNDirect Finfo (BCTC & chi so co ban)
 const fs = require('fs');
 
 // Guard: neu trinh duyet da phat hanh hom nay roi thi bo qua, khoi commit trung
@@ -10,18 +10,62 @@ try {
   if (mo0 && mo0[1] === vn0.toISOString().slice(0,10)) { console.log('Da tuoi (' + mo0[1] + '), bo qua.'); process.exit(0); }
 } catch(e) {}
 
-const REV = ['isa3','isb27','isi64','nos689','nos693'], NPAT = ['isa22','isa20'];
-const pick = (row, codes) => { for (const c of codes) if (row && row[c] != null) return row[c]; return null; };
+const FF = 'https://api-finfo.vndirect.com.vn/v4/';
+const MA_TL = 'PRICE_TO_EARNINGS,PRICE_TO_BOOK,MARKETCAP,DIVIDEND_YIELD,ROAE_TR_AVG4Q,ROAA_TR_AVG4Q,GROSS_MARGIN_TR,DEBT_TO_EQUITY_AQ,NET_SALES_QR_GRYOY,NET_PROFIT_QR_GRYOY';
+const TRUONG = ['pe','pb','cap','dy','roe','roa','gm','dte','revYoY','npatYoY','cagr3','q'];
+function so(v){ var n = +v; return isFinite(n) ? n : null; }
+function lam(v, d){ if (v == null) return null; var m = Math.pow(10, d); return Math.round(v * m) / m; }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function ngayDauQuy(nQuyTruoc){
+  var d = new Date(); var idx = d.getUTCFullYear()*4 + Math.ceil((d.getUTCMonth()+1)/3) - 1 - nQuyTruoc;
+  var y = Math.floor(idx/4), q = idx % 4 + 1;
+  return y + '-' + ('0' + ((q-1)*3 + 1)).slice(-2) + '-01';
+}
 
 async function jget(u, tries = 3) {
   for (let i = 0; i < tries; i++) {
     try {
-      const r = await fetch(u, { headers: { 'accept': '*/*', 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
+      const r = await fetch(u, { headers: { 'accept': '*/*', 'user-agent': 'Mozilla/5.0' } });
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return await r.json();
     } catch (e) { if (i === tries - 1) throw e; await sleep(800 * (i + 1)); }
   }
+}
+
+async function boSungLo(codes){
+  var w = codes.join(',');
+  var kq = await Promise.all([
+    jget(FF + 'ratios/latest?order=reportDate&filter=ratioCode:' + MA_TL + '&where=code:' + w + '&size=' + (codes.length*12)),
+    jget(FF + 'financial_statements?q=code:' + w + '~reportType:QUARTER~itemCode:21001,421701,23000~fiscalDate:gte:' + ngayDauQuy(17) + '&sort=fiscalDate&size=' + (codes.length*3*18))
+  ]);
+  var tl = kq[0], bc = kq[1], out = {};
+  (tl.data || []).forEach(function(x){
+    var v = so(x.value); if (v == null || !x.code) return; var o = out[x.code] || (out[x.code] = {});
+    switch (x.ratioCode) {
+      case 'PRICE_TO_EARNINGS': o.pe = lam(v, 2); break;      case 'PRICE_TO_BOOK': o.pb = lam(v, 2); break;
+      case 'MARKETCAP': o.cap = Math.round(v/1e9); break;     case 'DIVIDEND_YIELD': o.dy = lam(v*100, 1); break;
+      case 'ROAE_TR_AVG4Q': o.roe = lam(v*100, 1); break;     case 'ROAA_TR_AVG4Q': o.roa = lam(v*100, 1); break;
+      case 'GROSS_MARGIN_TR': o.gm = lam(v*100, 1); break;    case 'DEBT_TO_EQUITY_AQ': o.dte = lam(v, 2); break;
+      case 'NET_SALES_QR_GRYOY': o.revYoY = lam(v*100, 1); break; case 'NET_PROFIT_QR_GRYOY': o.npatYoY = lam(v*100, 1); break;
+    }
+  });
+  var quy = {};
+  (bc.data || []).forEach(function(x){
+    var d = String(x.fiscalDate || '').slice(0,10); if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || !x.code) return;
+    var y = +d.slice(0,4), q = Math.ceil(+d.slice(5,7)/3), k = y*4 + q, ic = Math.round(+x.itemCode), v = so(x.numericValue);
+    var m = quy[x.code] || (quy[x.code] = {}); var o = m[k] || (m[k] = { y: y, q: q, rev: 0, np: null });
+    if (ic === 21001 || ic === 421701) { if (v) o.rev = v; } else if (ic === 23000) o.np = v;
+  });
+  Object.keys(quy).forEach(function(c){
+    var o = out[c] || (out[c] = {});
+    var ds = Object.keys(quy[c]).map(Number).sort(function(a,b){ return a-b; }).map(function(k){ return quy[c][k]; }).filter(function(z){ return z.np != null; });
+    if (ds.length) o.q = ds.slice(-9).map(function(z){ return [z.y, z.q, z.rev, z.np]; });
+    if (ds.length >= 16) { var n = ds.length, ttm = 0, ttm3 = 0;
+      for (var i = 0; i < 4; i++) { ttm += ds[n-1-i].np; ttm3 += ds[n-13-i].np; }
+      if (ttm > 0 && ttm3 > 0) o.cagr3 = lam((Math.pow(ttm/ttm3, 1/3) - 1)*100, 1); }
+  });
+  return out;
 }
 
 function sma(a, n) { return a.length >= n ? a.slice(-n).reduce((x, y) => x + y, 0) / n : null; }
@@ -46,14 +90,9 @@ function rsiLast(c, n = 14) {
   const out = [];
   const CONC = 8;
 
-  async function one(tk) {
+  async function onePrice(tk) {
     try {
-      const [oh, qs, rtsRaw] = await Promise.all([
-        jget(`https://dchart-api.vndirect.com.vn/dchart/history?symbol=${tk.t}&resolution=D&from=${now - 86400 * 420}&to=${now}`),
-        jget(`https://iq.vietcap.com.vn/api/iq-insight-service/v1/company/${tk.t}/financial-statement?section=INCOME_STATEMENT`).then(x => (x && x.data && x.data.quarters) || []).catch(() => []),
-        jget(`https://iq.vietcap.com.vn/api/iq-insight-service/v1/company/${tk.t}/statistics-financial`).then(x => (x && x.data) || []).catch(() => [])
-      ]);
-      const rts = rtsRaw.filter(x => x.ratioType === 'RATIO_TTM' && x.quarter >= 1 && x.quarter <= 4);
+      const oh = await jget(`https://dchart-api.vndirect.com.vn/dchart/history?symbol=${tk.t}&resolution=D&from=${now - 86400 * 420}&to=${now}`);
       const c = oh.c || [], v = oh.v || [], o = { t: tk.t, b: tk.b, n: tk.n };
       if (c.length > 30) {
         const last = c[c.length - 1]; o.p = last;
@@ -76,45 +115,55 @@ function rsiLast(c, n = 14) {
           if (!hc && rng <= 12) { o.watch = 1; o.wrng = +rng.toFixed(1); o.wdb = +((c[L2] / hi - 1) * 100).toFixed(1); }
         }
       }
-      if (qs.length) {
-        const rev = qs.map(x => pick(x, REV)), np2 = qs.map(x => pick(x, NPAT)); const n = qs.length;
-        o.q = qs.slice(-9).map((x, i, arr) => { const idx = n - arr.length + i; return [x.yearReport, x.lengthReport, rev[idx], np2[idx]]; });
-        if (n >= 5 && np2[n-5] != null && np2[n-1] != null && np2[n-5] !== 0) o.npatYoY = +((np2[n-1] / Math.abs(np2[n-5]) - 1) * 100).toFixed(1);
-        if (n >= 5 && rev[n-5] && rev[n-1] != null) o.revYoY = +((rev[n-1] / Math.abs(rev[n-5]) - 1) * 100).toFixed(1);
-        if (n >= 17) { const a = np2.slice(n-4).reduce((x, y) => x + (y || 0), 0), b = np2.slice(n-16, n-12).reduce((x, y) => x + (y || 0), 0); if (a > 0 && b > 0) o.cagr3 = +((Math.pow(a / b, 1/3) - 1) * 100).toFixed(1); }
-      }
-      if (rts.length) {
-        const L = rts[rts.length - 1];
-        o.pe = L.pe != null ? +L.pe.toFixed(2) : null; o.pb = L.pb != null ? +L.pb.toFixed(2) : null;
-        o.roe = L.roe != null ? +(L.roe * 100).toFixed(1) : null; o.roa = L.roa != null ? +(L.roa * 100).toFixed(1) : null;
-        o.cap = L.marketCap ? Math.round(L.marketCap / 1e9) : null; o.dte = L.debtToEquity != null ? +L.debtToEquity.toFixed(2) : null;
-        o.gm = L.grossMargin != null ? +(L.grossMargin * 100).toFixed(1) : null; o.dy = L.dividendYield != null ? +(L.dividendYield * 100).toFixed(2) : null;
-      }
-      if (o.watch) o.wgrade = (o.npatYoY != null && o.npatYoY >= 0 && o.npatYoY < 25) ? 'weak' : 'strong';
       out.push(o);
     } catch (e) { /* skip ma loi */ }
   }
 
+  console.log('Fetching price history for ' + list.length + ' stocks...');
   for (let i = 0; i < list.length; i += CONC) {
-    await Promise.all(list.slice(i, i + CONC).map(one));
+    await Promise.all(list.slice(i, i + CONC).map(onePrice));
     if (i % 80 === 0) console.log(`${Math.min(i + CONC, list.length)}/${list.length}...`);
   }
 
   if (out.length < 600) { console.error(`CHI KEO DUOC ${out.length} MA — HUY, giu data cu.`); process.exit(1); }
 
-  // RS + CANSLIM
+  // Batch fetch fundamentals from VNDirect finfo
+  console.log('Fetching fundamentals in batches from VNDirect...');
+  const codes = out.map(r => r.t);
+  const LO = 35;
+  for (let i = 0; i < codes.length; i += LO) {
+    const batch = codes.slice(i, i + LO);
+    try {
+      const res = await boSungLo(batch);
+      out.slice(i, i + LO).forEach(r => {
+        const o = res[r.t];
+        if (!o) return;
+        TRUONG.forEach(k => { if (o[k] != null) r[k] = o[k]; });
+      });
+    } catch(e) { console.error('Batch error at ' + i + ':', e.message); }
+  }
+
+  // RS + CANSLIM + Watchlist grade
   const score = r => (r.r3 != null ? 0.4 * r.r3 : 0) + (r.r6 != null ? 0.3 * r.r6 : 0) + (r.r12 != null ? 0.3 * r.r12 : 0);
   const sorted = out.filter(r => r.p != null && (r.val20 || 0) >= 10000).map(r => ({ t: r.t, s: score(r) })).sort((a, b) => a.s - b.s);
   const rk = {}; sorted.forEach((x, i) => rk[x.t] = Math.max(1, Math.round((i + 1) / sorted.length * 99)));
   for (const r of out) {
     r.rs = rk[r.t] || null;
-    r.cs = { C: r.npatYoY >= 25 ? 1 : 0, A: (r.cagr3 || 0) >= 20 ? 1 : 0, N: (r.dHi ?? -99) >= -15 ? 1 : 0, S: (r.vx || 0) >= 1.2 ? 1 : 0, L: (r.rs || 0) >= 70 ? 1 : 0, I: (r.val20 || 0) >= 5000 ? 1 : 0 };
+    if (r.watch) r.wgrade = (r.npatYoY != null && r.npatYoY >= 0 && r.npatYoY < 25) ? 'weak' : 'strong';
+    r.cs = {
+      C: (r.npatYoY || 0) >= 25 ? 1 : 0,
+      A: (r.cagr3 || 0) >= 20 ? 1 : 0,
+      N: (r.dHi ?? -99) >= -15 ? 1 : 0,
+      S: (r.vx || 0) >= 1.2 ? 1 : 0,
+      L: (r.rs || 0) >= 70 ? 1 : 0,
+      I: (r.val20 || 0) >= 5000 ? 1 : 0
+    };
     r.csTong = Object.values(r.cs).reduce((a, b) => a + b, 0);
   }
 
   const vn = new Date(Date.now() + 7 * 3600 * 1000);
   const stamp = vn.toISOString().slice(0, 16).replace('T', ' ');
-  const SUM2 = { updated: stamp + ' (auto)', nTickers: out.length, rows: out, tpn: SUM.tpn };
+  const SUM2 = { updated: stamp + ' (auto)', coBan: 'vndirect ' + stamp.slice(0, 10), nTickers: out.length, rows: out, tpn: SUM.tpn };
   fs.writeFileSync('dashboard_data.js', 'window.SUMMARY=' + JSON.stringify(SUM2) + ';');
   console.log(`OK: ${out.length} ma, cap nhat ${stamp}`);
 })();
