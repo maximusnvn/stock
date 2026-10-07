@@ -21,7 +21,7 @@ jobs:
       - name: Commit neu co thay doi
         run: |
           git config user.name "maximus-data-bot"
-          git config user.email "maximus-bot@users.noreply.github.com"
+          git config user.email "maximus-data-bot@users.noreply.github.com"
           git add dashboard_data.js
           git diff --cached --quiet || git commit -m "Auto data update"
           git push
