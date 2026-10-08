@@ -5,7 +5,8 @@ name: Auto update data
 on:
   workflow_dispatch:
   schedule:
-    - cron: '20 13 * * 1-5'
+    - cron: '20 20 * * 1-5'
+      timezone: "Asia/Ho_Chi_Minh"
 permissions:
   contents: write
 jobs:
