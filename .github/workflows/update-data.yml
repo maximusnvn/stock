@@ -5,18 +5,23 @@ name: Auto update data
 on:
   workflow_dispatch:
   schedule:
-    - cron: '20 20 * * 1-5'
-      timezone: "Asia/Ho_Chi_Minh"
+    - cron: '20 13 * * 1-5'
 permissions:
   contents: write
 jobs:
   update:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
+      - name: Log schedule timing
+        run: |
+          echo "UTC time:"
+          date -u '+%Y-%m-%d %H:%M:%S UTC'
+          echo "Vietnam time:"
+          TZ=Asia/Ho_Chi_Minh date '+%Y-%m-%d %H:%M:%S %Z'
       - name: Cap nhat du lieu 702 ma
         run: node scripts/update_data.js
       - name: Commit neu co thay doi
